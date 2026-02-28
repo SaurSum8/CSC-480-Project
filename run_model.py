@@ -4,11 +4,11 @@ from torch import nn
 
 import helper
 from model import CNN
-from data_preprocessing import label2id, train_dataloader, val_dataloader, test_dataloader
+from data_preprocessing import train_dataloader, val_dataloader, test_dataloader, blank_id, id2char, num_classes
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CNN(in_channels=3, num_classes=len(label2id)).to(device)
+model = CNN(in_channels=3, num_classes=num_classes).to(device)
 
 
 total_params = sum(p.numel() for p in model.parameters())
@@ -19,8 +19,8 @@ print(f"Total params: {total_params:,} ({helper.format_param_size(total_params *
 print(f" Trainable params: {trainable_params:,} ({helper.format_param_size(trainable_params * 4)})")
 print(f" Non-trainable params: {non_trainable_params:,} ({helper.format_param_size(non_trainable_params * 4)})")
 
-loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
 num_epochs = 15
 
 
@@ -36,14 +36,20 @@ def run_epoch(dataloader, training=True, global_step=0):
 
     for batch in dataloader:
         x = batch["pixel_values"].to(device)
-        y = batch["label_id"].to(device=device, dtype=torch.long)
+        targets = batch["targets"].to(device=device, dtype=torch.long)
+        target_lengths = batch["target_lengths"].to(device=device, dtype=torch.long)
+        labels = batch["labels"]
 
         if training:
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(training):
             logits = model(x)
-            loss = loss_fn(logits, y)
+            log_probs = logits.log_softmax(dim=2).transpose(0, 1)
+            input_lengths = torch.full(
+                (x.size(0),), log_probs.size(0), dtype=torch.long, device=device
+            )
+            loss = loss_fn(log_probs, targets, input_lengths, target_lengths)
 
             if training:
                 loss.backward()
@@ -54,11 +60,15 @@ def run_epoch(dataloader, training=True, global_step=0):
                 if global_step % 100 == 0:
                     print(f"step={global_step} loss={loss.item():.4f}")
 
-        batch_size = y.size(0)
+        batch_size = x.size(0)
         total_loss += loss.item() * batch_size
-        preds = logits.argmax(dim=1)
-        total_correct += (preds == y).sum().item()
         total_seen += batch_size
+
+        pred_ids = logits.argmax(dim=2).detach().cpu().tolist()
+        pred_texts = [
+            helper.ctc_greedy_decode(ids, id2char=id2char, blank_id=blank_id) for ids in pred_ids
+        ]
+        total_correct += sum(int(pred == label) for pred, label in zip(pred_texts, labels))
 
     avg_loss = total_loss / max(total_seen, 1)
     avg_acc = total_correct / max(total_seen, 1)
@@ -77,11 +87,11 @@ for epoch in range(num_epochs):
     elapsed_s = time.perf_counter() - epoch_start
     print(
         f"Epoch {epoch + 1}/{num_epochs} | "
-        f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
-        f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} | "
+        f"train_loss={train_loss:.4f} train_exact={train_acc:.4f} | "
+        f"val_loss={val_loss:.4f} val_exact={val_acc:.4f} | "
         f"{elapsed_s:.1f}s"
     )
 
 
 test_loss, test_acc, _ = run_epoch(test_dataloader, training=False, global_step=global_step)
-print(f"Test | loss={test_loss:.4f} acc={test_acc:.4f}")
+print(f"Test | loss={test_loss:.4f} exact={test_acc:.4f}")
