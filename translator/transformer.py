@@ -352,7 +352,7 @@ def main():
 
     # Training Data
     subset = dsRaw["train"].select(range(1, 10001))
-    pairs = [(encode_src(ex['translation']["en"]), encode_tgt(ex['translation']["es"])) for ex in subset]
+    pairs = [(encode_src(ex['translation']["es"]), encode_tgt(ex['translation']["en"])) for ex in subset]
 
     ds = TranslationDataset(pairs, pad_id=specials.pad_id)
     dl = DataLoader(ds, batch_size=16, shuffle=True, collate_fn=lambda b: collate_fn(b, specials.pad_id))
@@ -364,7 +364,7 @@ def main():
         print(f"epoch={epoch} loss={loss:.4f}")
 
     # Inference on single example
-    src_ids = encode_src("The cat is on the table.")
+    src_ids = encode_src("El gato está en el mesa.")
     src_tensor = torch.tensor(src_ids).unsqueeze(1)  # (seq, 1)
     decoded = greedy_decode(model, src_tensor, device, specials, max_len=30).squeeze(1).tolist()
     print("decoded ids", decoded)
