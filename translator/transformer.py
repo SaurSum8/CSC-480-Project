@@ -11,6 +11,8 @@ from transformers import AutoTokenizer
 
 from datasets import load_dataset
 
+from sentence_transformers import SentenceTransformer
+
 # -----------------------------
 # Positional Encoding (classic)
 # -----------------------------
@@ -304,33 +306,37 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    dsRaw = load_dataset("Helsinki-NLP/opus_books", "en-es")
+    dsRaw = load_dataset("sentence-transformers/parallel-sentences-tatoeba", "en-es")
 
     # Tokenizer and vocab setup
-    model_name = "Helsinki-NLP/opus-mt-es-en"
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
     tok = AutoTokenizer.from_pretrained(model_name)
 
     print(dsRaw["train"][0])
 
     pad_id = tok.pad_token_id
-    eos_id = tok.eos_token_id
-    bos_id = tok.bos_token_id if tok.bos_token_id is not None else eos_id  # safe fallback
+    bos_id = tok.cls_token_id # BERT "start"
+    eos_id = tok.sep_token_id # BERT "end"
 
+    if pad_id is None:
+        print("You are fucked" * 10)
+        raise ValueError("No pad token found!")
+
+    if bos_id is None or eos_id is None:
+        raise ValueError("Tokenizer is missing CLS/SEP token ids; cannot use as BOS/EOS.")
+    
     SRC_VOCAB_SIZE = tok.vocab_size
     TGT_VOCAB_SIZE = tok.vocab_size
 
     specials = SpecialTokens(pad_id=pad_id, bos_id=bos_id, eos_id=eos_id)
 
     def encode_src(text: str):
-        return tok(text, add_special_tokens=True, truncation=True)["input_ids"]
+        return tok(text, add_special_tokens=True, truncation=True, max_length=256)["input_ids"]
 
     def encode_tgt(text: str):
-        ids = tok(text, add_special_tokens=True, truncation=True)["input_ids"]
-        if ids[0] != specials.bos_id:
-            ids = [specials.bos_id] + ids
-        if ids[-1] != specials.eos_id:
-            ids = ids + [specials.eos_id]
-        return ids
+        # do NOT add_special_tokens here; we add BOS/EOS ourselves
+        ids = tok(text, add_special_tokens=False, truncation=True, max_length=254)["input_ids"]
+        return [specials.bos_id] + ids + [specials.eos_id]
 
     def decode(ids):
         return tok.decode(ids, skip_special_tokens=True)
@@ -348,11 +354,11 @@ def main():
         pad_id=specials.pad_id,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # Training Data
     subset = dsRaw["train"].select(range(1, 10001))
-    pairs = [(encode_src(ex['translation']["es"]), encode_tgt(ex['translation']["en"])) for ex in subset]
+    pairs = [(encode_src(ex["non_english"]), encode_tgt(ex["english"])) for ex in subset]
 
     ds = TranslationDataset(pairs, pad_id=specials.pad_id)
     dl = DataLoader(ds, batch_size=16, shuffle=True, collate_fn=lambda b: collate_fn(b, specials.pad_id))
@@ -364,7 +370,7 @@ def main():
         print(f"epoch={epoch} loss={loss:.4f}")
 
     # Inference on single example
-    src_ids = encode_src("El gato está en el mesa.")
+    src_ids = encode_src("Yo soy un estudiante.")
     src_tensor = torch.tensor(src_ids).unsqueeze(1)  # (seq, 1)
     decoded = greedy_decode(model, src_tensor, device, specials, max_len=30).squeeze(1).tolist()
     print("decoded ids", decoded)
