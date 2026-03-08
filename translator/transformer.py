@@ -202,6 +202,7 @@ def train_one_epoch(
     specials: SpecialTokens,
     label_smoothing: float = 0.0,
     grad_clip: float = 1.0,
+    inTraining: bool = True
 ):
     model.train()
     total_loss = 0.0
@@ -233,7 +234,8 @@ def train_one_epoch(
             memory_key_padding_mask=memory_key_padding_mask,
         )  # (tgt_seq-1, batch, vocab)
 
-        optimizer.zero_grad(set_to_none=True)
+        if inTraining:
+            optimizer.zero_grad(set_to_none=True)
 
         # Flatten for CE loss
         vocab_size = logits.size(-1)
@@ -246,12 +248,15 @@ def train_one_epoch(
             ignore_index=specials.pad_id,
             label_smoothing=label_smoothing,
         )
-        loss.backward()
+        
+        if inTraining:
+            loss.backward()
 
-        if grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        optimizer.step()
+            optimizer.step()
+
         total_loss += loss.item()
 
     return total_loss / max(1, len(dataloader))
@@ -363,18 +368,40 @@ def main():
     ds = TranslationDataset(pairs, pad_id=specials.pad_id)
     dl = DataLoader(ds, batch_size=16, shuffle=True, collate_fn=lambda b: collate_fn(b, specials.pad_id))
 
+    # Validation Data
+    valSet = dsRaw["dev"].select(range(len(dsRaw["dev"]) // 2))
+    pairsVal = [(encode_src(ex["non_english"]), encode_tgt(ex["english"])) for ex in valSet]
+
+    dsV = TranslationDataset(pairsVal, pad_id=specials.pad_id)
+    dlV = DataLoader(dsV, collate_fn=lambda b: collate_fn(b, specials.pad_id))
+
+    # Call to train
     print("Starting training...")
 
     for epoch in range(30):
         loss = train_one_epoch(model, dl, optimizer, device, specials, label_smoothing=0.1)
-        print(f"epoch={epoch} loss={loss:.4f}")
+        val_loss = train_one_epoch(model, dlV, optimizer, device, specials, label_smoothing=0.1, inTraining=False)
+        print(f"epoch={epoch} loss={loss:.4f} val_loss={val_loss:.4f}")
 
     # Inference on single example
-    src_ids = encode_src("Yo soy un estudiante.")
+    src_ids = encode_src("Yo soy un estudiante inteligente.")
     src_tensor = torch.tensor(src_ids).unsqueeze(1)  # (seq, 1)
     decoded = greedy_decode(model, src_tensor, device, specials, max_len=30).squeeze(1).tolist()
     print("decoded ids", decoded)
     print("decoded example:", decode(decoded))
+
+    # Test
+    tSet = dsRaw["dev"].select(range(len(dsRaw["dev"]) // 2 + 1, len(dsRaw["dev"])))
+    pairsT = [(encode_src(ex["non_english"]), encode_tgt(ex["english"])) for ex in tSet]
+
+    dsT = TranslationDataset(pairsT, pad_id=specials.pad_id)
+    dlT = DataLoader(dsT, collate_fn=lambda b: collate_fn(b, specials.pad_id))
+
+    test_loss = train_one_epoch(model, dlT, optimizer, device, specials, label_smoothing=0.1, inTraining=False)
+    print(f"Test loss: {test_loss:.4f}")
+
+    # Save the model
+    torch.save(model.state_dict(), "transformer_translation.pt")
 
 if __name__ == "__main__":
     main()
