@@ -7,6 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+from transformers import AutoTokenizer
+
+from datasets import load_dataset
+
 # -----------------------------
 # Positional Encoding (classic)
 # -----------------------------
@@ -293,17 +297,43 @@ def greedy_decode(
 
     return ys
 
-
 # -----------------------------
 # Example "main" skeleton
 # -----------------------------
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
 
-    # You MUST set these from your tokenizers/vocabs
-    SRC_VOCAB_SIZE = 32000
-    TGT_VOCAB_SIZE = 32000
-    specials = SpecialTokens(pad_id=0, bos_id=1, eos_id=2)
+    dsRaw = load_dataset("Helsinki-NLP/opus_books", "en-es")
+
+    # Tokenizer and vocab setup
+    model_name = "Helsinki-NLP/opus-mt-es-en"
+    tok = AutoTokenizer.from_pretrained(model_name)
+
+    print(dsRaw["train"][0])
+
+    pad_id = tok.pad_token_id
+    eos_id = tok.eos_token_id
+    bos_id = tok.bos_token_id if tok.bos_token_id is not None else eos_id  # safe fallback
+
+    SRC_VOCAB_SIZE = tok.vocab_size
+    TGT_VOCAB_SIZE = tok.vocab_size
+
+    specials = SpecialTokens(pad_id=pad_id, bos_id=bos_id, eos_id=eos_id)
+
+    def encode_src(text: str):
+        return tok(text, add_special_tokens=True, truncation=True)["input_ids"]
+
+    def encode_tgt(text: str):
+        ids = tok(text, add_special_tokens=True, truncation=True)["input_ids"]
+        if ids[0] != specials.bos_id:
+            ids = [specials.bos_id] + ids
+        if ids[-1] != specials.eos_id:
+            ids = ids + [specials.eos_id]
+        return ids
+
+    def decode(ids):
+        return tok.decode(ids, skip_special_tokens=True)
 
     # Model hyperparams
     model = Seq2SeqTransformer(
@@ -320,25 +350,25 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
-    # Example toy data: replace with real tokenized sentence pairs
-    # Each tgt sequence should be: [BOS] ... [EOS]
-    pairs = [
-        ([5, 10, 11, 12, 2], [1, 7, 8, 9, 2]),
-        ([6, 13, 14, 2],    [1, 15, 16, 2]),
-    ]
-    ds = TranslationDataset(pairs, pad_id=specials.pad_id)
-    dl = DataLoader(ds, batch_size=2, shuffle=True, collate_fn=lambda b: collate_fn(b, specials.pad_id))
+    # Training Data
+    subset = dsRaw["train"].select(range(1, 10001))
+    pairs = [(encode_src(ex['translation']["en"]), encode_tgt(ex['translation']["es"])) for ex in subset]
 
-    for epoch in range(5):
+    ds = TranslationDataset(pairs, pad_id=specials.pad_id)
+    dl = DataLoader(ds, batch_size=16, shuffle=True, collate_fn=lambda b: collate_fn(b, specials.pad_id))
+
+    print("Starting training...")
+
+    for epoch in range(30):
         loss = train_one_epoch(model, dl, optimizer, device, specials, label_smoothing=0.1)
         print(f"epoch={epoch} loss={loss:.4f}")
 
     # Inference on single example
-    src_example, _ = ds[0]
-    src_tensor = torch.tensor(src_example, dtype=torch.long).unsqueeze(1)  # (seq, 1)
+    src_ids = encode_src("The cat is on the table.")
+    src_tensor = torch.tensor(src_ids).unsqueeze(1)  # (seq, 1)
     decoded = greedy_decode(model, src_tensor, device, specials, max_len=30).squeeze(1).tolist()
-    print("decoded token ids:", decoded)
-
+    print("decoded ids", decoded)
+    print("decoded example:", decode(decoded))
 
 if __name__ == "__main__":
     main()
