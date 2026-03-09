@@ -1,7 +1,6 @@
 import torch
 import torchvision.transforms.functional as f
 
-
 def preprocess(img):
     # ensure 3-channel input for the CNN.
     if getattr(img, "mode", None) != "RGB":

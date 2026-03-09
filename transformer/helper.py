@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import torch.nn.functional as F
 
-from model import *
+from transformer.model import *
 
 # -----------------------------
 # Training + decoding utilities
